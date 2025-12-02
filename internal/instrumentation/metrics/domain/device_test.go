@@ -65,6 +65,10 @@ func (m *MockStore) AuthProvider() store.AuthProvider {
 	return nil
 }
 
+func (m *MockStore) CertificateRenewalEvent() store.CertificateRenewalEventStore {
+	return nil
+}
+
 func (m *MockStore) RunMigrations(context.Context) error {
 	return nil
 }
@@ -188,6 +192,38 @@ func (m *MockDevice) GetAllDeviceNames(ctx context.Context, orgId uuid.UUID) ([]
 
 func (m *MockDevice) ProcessAwaitingReconnectAnnotation(ctx context.Context, orgId uuid.UUID, deviceName string, deviceReportedVersion *string) (bool, error) {
 	return false, nil
+}
+
+func (m *MockDevice) GetCertificateExpiration(ctx context.Context, orgId uuid.UUID, deviceName string) (*time.Time, error) {
+	return nil, nil
+}
+
+func (m *MockDevice) GetCertificateRenewalCount(ctx context.Context, orgId uuid.UUID, deviceName string) (int, error) {
+	return 0, nil
+}
+
+func (m *MockDevice) ListDevicesExpiringSoon(ctx context.Context, orgId uuid.UUID, thresholdDate time.Time) ([]*api.Device, error) {
+	return nil, nil
+}
+
+func (m *MockDevice) ListDevicesWithExpiredCertificates(ctx context.Context, orgId uuid.UUID) ([]*api.Device, error) {
+	return nil, nil
+}
+
+func (m *MockDevice) UpdateCertificateExpiration(ctx context.Context, orgId uuid.UUID, deviceName string, expiration *time.Time) error {
+	return nil
+}
+
+func (m *MockDevice) UpdateCertificateFingerprint(ctx context.Context, orgId uuid.UUID, deviceName string, fingerprint string) error {
+	return nil
+}
+
+func (m *MockDevice) UpdateCertificateRenewalInfo(ctx context.Context, orgId uuid.UUID, deviceName string, lastRenewed *time.Time, renewalCount int, fingerprint *string) error {
+	return nil
+}
+
+func (m *MockDevice) UpdateCertificateTracking(ctx context.Context, orgId uuid.UUID, deviceName string, expiration *time.Time, fingerprint *string, lastRenewed *time.Time, renewalCount *int) error {
+	return nil
 }
 
 func TestDeviceCollectorWithGroupByFleet(t *testing.T) {

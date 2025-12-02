@@ -2,12 +2,16 @@ package identity
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"testing"
 
 	grpc_v1 "github.com/flightctl/flightctl/api/grpc/v1"
 	api "github.com/flightctl/flightctl/api/v1beta1"
 	agent_config "github.com/flightctl/flightctl/internal/agent/config"
+	"github.com/flightctl/flightctl/internal/agent/device/fileio"
 	"github.com/flightctl/flightctl/internal/tpm"
 	"github.com/flightctl/flightctl/pkg/log"
 	"github.com/stretchr/testify/require"
@@ -308,4 +312,53 @@ func TestTPMProvider_NewExportable(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTPMProvider_GenerateRenewalAttestation(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx := context.Background()
+	logger := log.NewPrefixLogger("test")
+
+	t.Run("Generates renewal attestation successfully", func(t *testing.T) {
+		mockClient := tpm.NewMockClient(ctrl)
+		config := &agent_config.Config{}
+		rw := fileio.NewReadWriter()
+
+		provider := newTPMProvider(mockClient, config, "", "", rw, logger)
+
+		// Set up expectations for renewal attestation generation
+		publicKey := createMockPublicKeyForTPMTest(t)
+		expectedCSR := []byte("mock-csr-data")
+
+		mockClient.EXPECT().Public().Return(publicKey).AnyTimes()
+		mockClient.EXPECT().MakeCSR("renewal-attestation", gomock.Any()).Return(expectedCSR, nil)
+
+		attestation, err := provider.GenerateRenewalAttestation(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, attestation)
+		require.Equal(t, expectedCSR, attestation.TPMQuote)
+		require.NotEmpty(t, attestation.DeviceFingerprint)
+		require.NotEmpty(t, attestation.Nonce)
+	})
+
+	t.Run("Handles missing renewal provider", func(t *testing.T) {
+		config := &agent_config.Config{}
+		rw := fileio.NewReadWriter()
+
+		// Create provider without TPM client (renewal provider will be nil)
+		provider := newTPMProvider(nil, config, "", "", rw, logger)
+
+		_, err := provider.GenerateRenewalAttestation(ctx)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "TPM renewal provider not available")
+	})
+}
+
+// createMockPublicKeyForTPMTest creates a mock ECDSA public key for testing
+func createMockPublicKeyForTPMTest(t *testing.T) *ecdsa.PublicKey {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	return &privateKey.PublicKey
 }

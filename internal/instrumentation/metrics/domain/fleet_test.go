@@ -166,6 +166,10 @@ func (m *MockFleetStoreWrapper) AuthProvider() store.AuthProvider {
 	return nil
 }
 
+func (m *MockFleetStoreWrapper) CertificateRenewalEvent() store.CertificateRenewalEventStore {
+	return nil
+}
+
 func (m *MockFleetStoreWrapper) RunMigrations(context.Context) error {
 	return nil
 }

@@ -36,9 +36,12 @@ func (m *MockRepositoryStore) Event() store.Event                               
 func (m *MockRepositoryStore) Checkpoint() store.Checkpoint                               { return nil }
 func (m *MockRepositoryStore) Organization() store.Organization                           { return nil }
 func (m *MockRepositoryStore) AuthProvider() store.AuthProvider                           { return nil }
-func (m *MockRepositoryStore) RunMigrations(context.Context) error                        { return nil }
-func (m *MockRepositoryStore) Close() error                                               { return nil }
-func (m *MockRepositoryStore) CheckHealth(context.Context) error                          { return nil }
+func (m *MockRepositoryStore) CertificateRenewalEvent() store.CertificateRenewalEventStore {
+	return nil
+}
+func (m *MockRepositoryStore) RunMigrations(context.Context) error { return nil }
+func (m *MockRepositoryStore) Close() error                        { return nil }
+func (m *MockRepositoryStore) CheckHealth(context.Context) error   { return nil }
 
 type MockRepository struct {
 	count   int64

@@ -22,13 +22,14 @@ const statusNotFoundCode = int32(http.StatusNotFound)
 
 type TestStore struct {
 	store.Store
-	devices            *DummyDevice
-	events             *DummyEvent
-	fleets             *DummyFleet
-	repositories       *DummyRepository
-	resourceSyncVals   *DummyResourceSync
-	enrollmentRequests *DummyEnrollmentRequest
-	organizations      *DummyOrganization
+	devices                    *DummyDevice
+	events                     *DummyEvent
+	fleets                     *DummyFleet
+	repositories               *DummyRepository
+	resourceSyncVals           *DummyResourceSync
+	enrollmentRequests         *DummyEnrollmentRequest
+	organizations              *DummyOrganization
+	certificateSigningRequests *DummyCertificateSigningRequest
 }
 
 type DummyDevice struct {
@@ -67,6 +68,11 @@ type DummyOrganization struct {
 	err           error
 }
 
+type DummyCertificateSigningRequest struct {
+	store.CertificateSigningRequest
+	csrs *[]api.CertificateSigningRequest
+}
+
 func (s *TestStore) init() {
 	if s.events == nil {
 		s.events = &DummyEvent{events: &[]api.Event{}}
@@ -88,6 +94,9 @@ func (s *TestStore) init() {
 	}
 	if s.organizations == nil {
 		s.organizations = &DummyOrganization{organizations: &[]*model.Organization{}}
+	}
+	if s.certificateSigningRequests == nil {
+		s.certificateSigningRequests = &DummyCertificateSigningRequest{csrs: &[]api.CertificateSigningRequest{}}
 	}
 }
 
@@ -124,6 +133,11 @@ func (s *TestStore) EnrollmentRequest() store.EnrollmentRequest {
 func (s *TestStore) Organization() store.Organization {
 	s.init()
 	return s.organizations
+}
+
+func (s *TestStore) CertificateSigningRequest() store.CertificateSigningRequest {
+	s.init()
+	return s.certificateSigningRequests
 }
 
 // --------------------------------------> Event
@@ -541,6 +555,123 @@ type DummyWorkerClient struct {
 
 func (s *DummyWorkerClient) EmitEvent(ctx context.Context, orgId uuid.UUID, event *api.Event) {
 	// TODO: implement
+}
+
+// --------------------------------------> CertificateSigningRequest
+
+func (s *DummyCertificateSigningRequest) InitialMigration(ctx context.Context) error {
+	return nil
+}
+
+func (s *DummyCertificateSigningRequest) Get(ctx context.Context, orgId uuid.UUID, name string) (*api.CertificateSigningRequest, error) {
+	for _, csr := range *s.csrs {
+		if name == *csr.Metadata.Name {
+			var c api.CertificateSigningRequest
+			deepCopy(csr, &c)
+			return &c, nil
+		}
+	}
+	return nil, flterrors.ErrResourceNotFound
+}
+
+func (s *DummyCertificateSigningRequest) Create(ctx context.Context, orgId uuid.UUID, req *api.CertificateSigningRequest, eventCallback store.EventCallback) (*api.CertificateSigningRequest, error) {
+	var c api.CertificateSigningRequest
+	deepCopy(req, &c)
+	*s.csrs = append(*s.csrs, c)
+	if eventCallback != nil {
+		eventCallback(ctx, api.CertificateSigningRequestKind, orgId, lo.FromPtr(req.Metadata.Name), nil, req, true, nil)
+	}
+	return req, nil
+}
+
+func (s *DummyCertificateSigningRequest) Update(ctx context.Context, orgId uuid.UUID, req *api.CertificateSigningRequest, eventCallback store.EventCallback) (*api.CertificateSigningRequest, error) {
+	for i, csr := range *s.csrs {
+		if *req.Metadata.Name == *csr.Metadata.Name {
+			var oldCsr api.CertificateSigningRequest
+			deepCopy(csr, &oldCsr)
+			var c api.CertificateSigningRequest
+			deepCopy(req, &c)
+			(*s.csrs)[i] = c
+			if eventCallback != nil {
+				eventCallback(ctx, api.CertificateSigningRequestKind, orgId, lo.FromPtr(req.Metadata.Name), &oldCsr, req, false, nil)
+			}
+			return req, nil
+		}
+	}
+	return nil, flterrors.ErrResourceNotFound
+}
+
+func (s *DummyCertificateSigningRequest) CreateOrUpdate(ctx context.Context, orgId uuid.UUID, req *api.CertificateSigningRequest, eventCallback store.EventCallback) (*api.CertificateSigningRequest, bool, error) {
+	created := true
+	var c api.CertificateSigningRequest
+	deepCopy(req, &c)
+	var oldCsr *api.CertificateSigningRequest
+	for i, csr := range *s.csrs {
+		if *req.Metadata.Name == *csr.Metadata.Name {
+			var old api.CertificateSigningRequest
+			deepCopy(csr, &old)
+			oldCsr = &old
+			*s.csrs = append((*s.csrs)[:i], (*s.csrs)[i+1:]...)
+			created = false
+			break
+		}
+	}
+	*s.csrs = append(*s.csrs, c)
+	if eventCallback != nil {
+		eventCallback(ctx, api.CertificateSigningRequestKind, orgId, lo.FromPtr(req.Metadata.Name), oldCsr, req, created, nil)
+	}
+	return req, created, nil
+}
+
+func (s *DummyCertificateSigningRequest) List(ctx context.Context, orgId uuid.UUID, listParams store.ListParams) (*api.CertificateSigningRequestList, error) {
+	return &api.CertificateSigningRequestList{
+		ApiVersion: "",
+		Kind:       "",
+		Metadata:   api.ListMeta{},
+		Items:      *s.csrs,
+	}, nil
+}
+
+func (s *DummyCertificateSigningRequest) Delete(ctx context.Context, orgId uuid.UUID, name string, eventCallback store.EventCallback) error {
+	for i, csr := range *s.csrs {
+		if name == *csr.Metadata.Name {
+			var oldCsr api.CertificateSigningRequest
+			deepCopy(csr, &oldCsr)
+			*s.csrs = append((*s.csrs)[:i], (*s.csrs)[i+1:]...)
+			if eventCallback != nil {
+				eventCallback(ctx, api.CertificateSigningRequestKind, orgId, name, &oldCsr, nil, false, nil)
+			}
+			return nil
+		}
+	}
+	return flterrors.ErrResourceNotFound
+}
+
+func (s *DummyCertificateSigningRequest) UpdateStatus(ctx context.Context, orgId uuid.UUID, req *api.CertificateSigningRequest) (*api.CertificateSigningRequest, error) {
+	for i, csr := range *s.csrs {
+		if *req.Metadata.Name == *csr.Metadata.Name {
+			var oldCsr api.CertificateSigningRequest
+			deepCopy(csr, &oldCsr)
+			var c api.CertificateSigningRequest
+			deepCopy(req, &c)
+			(*s.csrs)[i].Status = c.Status
+			return req, nil
+		}
+	}
+	return nil, flterrors.ErrResourceNotFound
+}
+
+func (s *DummyCertificateSigningRequest) UpdateConditions(ctx context.Context, orgId uuid.UUID, name string, conditions []api.Condition) error {
+	for i, csr := range *s.csrs {
+		if name == *csr.Metadata.Name {
+			if (*s.csrs)[i].Status == nil {
+				(*s.csrs)[i].Status = &api.CertificateSigningRequestStatus{}
+			}
+			(*s.csrs)[i].Status.Conditions = conditions
+			return nil
+		}
+	}
+	return flterrors.ErrResourceNotFound
 }
 
 // --------------------------------------> Helper functions
