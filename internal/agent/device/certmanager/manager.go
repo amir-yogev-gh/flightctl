@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/flightctl/flightctl/internal/agent/config"
 	"github.com/flightctl/flightctl/internal/agent/device/certmanager/provider"
+	"github.com/flightctl/flightctl/internal/agent/device/fileio"
 )
 
 const DefaultRequeueDelay = 10 * time.Second
@@ -31,6 +33,28 @@ type CertManager struct {
 	processingQueue *CertificateProcessingQueue
 	// Delay before retrying failed certificate operations
 	requeueDelay time.Duration
+	// ExpirationMonitor for checking certificate validity
+	expirationMonitor *ExpirationMonitor
+	// LifecycleManager for managing certificate lifecycle states
+	lifecycleManager *LifecycleManager
+	// config stores agent configuration for renewal settings
+	config *config.Config
+	// readWriter for file I/O operations (used for CA bundle loading)
+	readWriter fileio.ReadWriter
+	// metricsCollector for recording certificate metrics (optional)
+	metricsCollector MetricsCollector
+}
+
+// MetricsCollector defines the interface for certificate metrics collection.
+// This allows the certificate manager to record metrics without directly depending on Prometheus.
+type MetricsCollector interface {
+	RecordCertificateExpiration(certType, certName string, expirationTime time.Time, daysUntilExpiration int)
+	RecordRenewalAttempt(certType, certName, reason string)
+	RecordRenewalSuccess(certType, certName, reason string, duration time.Duration)
+	RecordRenewalFailure(certType, certName, reason string, duration time.Duration)
+	RecordRecoveryAttempt(certType, certName string)
+	RecordRecoverySuccess(certType, certName string, duration time.Duration)
+	RecordRecoveryFailure(certType, certName string, duration time.Duration)
 }
 
 // ManagerOption defines a functional option for configuring CertManager during initialization.
@@ -106,6 +130,14 @@ func WithStorageProvider(store provider.StorageFactory) ManagerOption {
 	}
 }
 
+// WithMetricsCollector sets the metrics collector for certificate operations.
+func WithMetricsCollector(collector MetricsCollector) ManagerOption {
+	return func(cm *CertManager) error {
+		cm.metricsCollector = collector
+		return nil
+	}
+}
+
 // NewManager creates and initializes a new CertManager with the provided options.
 func NewManager(ctx context.Context, log provider.Logger, opts ...ManagerOption) (*CertManager, error) {
 	if log == nil {
@@ -113,11 +145,12 @@ func NewManager(ctx context.Context, log provider.Logger, opts ...ManagerOption)
 	}
 
 	cm := &CertManager{
-		log:          log,
-		configs:      make(map[string]provider.ConfigProvider),
-		provisioners: make(map[string]provider.ProvisionerFactory),
-		storages:     make(map[string]provider.StorageFactory),
-		certificates: newCertStorage(),
+		log:               log,
+		configs:           make(map[string]provider.ConfigProvider),
+		provisioners:      make(map[string]provider.ProvisionerFactory),
+		storages:          make(map[string]provider.StorageFactory),
+		certificates:      newCertStorage(),
+		expirationMonitor: NewExpirationMonitor(log),
 	}
 
 	for _, opt := range opts {
@@ -130,13 +163,25 @@ func NewManager(ctx context.Context, log provider.Logger, opts ...ManagerOption)
 		cm.requeueDelay = DefaultRequeueDelay
 	}
 
+	// Initialize expiration monitor if not already set
+	if cm.expirationMonitor == nil {
+		cm.expirationMonitor = NewExpirationMonitor(log)
+	}
+
+	// Initialize lifecycle manager
+	// Note: bootstrapHandler will be set later if available
+	cm.lifecycleManager = NewLifecycleManager(cm, cm.expirationMonitor, log, nil)
+
 	cm.processingQueue = NewCertificateProcessingQueue(cm.ensureCertificate)
 	go cm.processingQueue.Run(ctx)
 	return cm, nil
 }
 
 // Sync performs a full synchronization of all certificate providers.
-func (cm *CertManager) Sync(ctx context.Context, _ *config.Config) error {
+func (cm *CertManager) Sync(ctx context.Context, cfg *config.Config) error {
+	// Store config for use in renewal checks
+	cm.config = cfg
+
 	cm.log.Debug("Starting certificate sync")
 	if err := cm.sync(ctx); err != nil {
 		cm.log.Errorf("certificate management sync failed: %v", err)
@@ -165,6 +210,15 @@ func (cm *CertManager) sync(ctx context.Context) error {
 			cm.log.Errorf("syncProvider failed for %q: %v", providerName, err)
 		}
 	}
+
+	// Check for expired certificates after sync
+	if cm.lifecycleManager != nil {
+		if err := cm.lifecycleManager.CheckExpiredCertificates(ctx); err != nil {
+			cm.log.Warnf("Failed to check expired certificates during sync: %v", err)
+			// Don't fail sync if expiration check fails
+		}
+	}
+
 	return nil
 }
 
@@ -250,6 +304,34 @@ func (cm *CertManager) syncCertificate(ctx context.Context, provider provider.Co
 
 	if !cm.shouldprovisionCertificate(providerName, cert, cfg) {
 		cert.Config = cfg
+
+		// Check if renewal is needed based on expiration
+		if cm.lifecycleManager != nil && cm.config != nil {
+			thresholdDays := cm.config.Certificate.Renewal.ThresholdDays
+			if thresholdDays == 0 {
+				thresholdDays = 30 // Default threshold
+			}
+
+			// Only check renewal if certificate has expiration info
+			if cert.Info.NotAfter != nil {
+				needsRenewal, days, err := cm.shouldRenewCertificate(ctx, providerName, cert, thresholdDays)
+				if err != nil {
+					cm.log.Warnf("Failed to check renewal for certificate %q/%q: %v", providerName, certName, err)
+				} else if needsRenewal {
+					cm.log.Infof("Certificate %q/%q needs renewal (expires in %d days)", providerName, certName, days)
+
+					// Check current state - don't trigger if already renewing
+					currentState, err := cm.lifecycleManager.GetCertificateState(ctx, providerName, certName)
+					if err == nil && currentState.GetState() != CertificateStateRenewing {
+						if err := cm.triggerRenewal(ctx, providerName, cert, cfg); err != nil {
+							cm.log.Errorf("Failed to trigger renewal for certificate %q/%q: %v", providerName, certName, err)
+							// Continue - renewal will be retried on next sync
+						}
+					}
+				}
+			}
+		}
+
 		cm.log.Debugf("Certificate %q for provider %q: no provision required", certName, providerName)
 		return nil
 	}
@@ -336,6 +418,19 @@ func (cm *CertManager) ensureCertificate(ctx context.Context, providerName strin
 	if err != nil {
 		cm.log.Errorf("failed to ensure certificate %q from provider %q: %v", cert.Name, providerName, err)
 
+		// Update lifecycle state if this was a renewal
+		if cm.lifecycleManager != nil {
+			currentState, stateErr := cm.lifecycleManager.GetCertificateState(ctx, providerName, cert.Name)
+			if stateErr == nil && currentState.GetState() == CertificateStateRenewing {
+				// Renewal failed
+				_ = cm.lifecycleManager.RecordError(ctx, providerName, cert.Name, err)
+				// State will be set to renewal_failed by RecordError
+			} else {
+				// Record error in lifecycle manager
+				_ = cm.lifecycleManager.RecordError(ctx, providerName, cert.Name, err)
+			}
+		}
+
 		// On failure, reset provisioner and storage to force re-init next time
 		cert.Provisioner = nil
 		cert.Storage = nil
@@ -382,10 +477,42 @@ func (cm *CertManager) ensureCertificate_do(ctx context.Context, providerName st
 		cert.Provisioner = p
 	}
 
+	// Log CSR generation/submission start
+	// Check if this is a renewal to determine reason
+	csrIsRenewal := cert.Info.NotAfter != nil && cert.Info.NotBefore != nil
+	csrReason := "provisioning"
+	if csrIsRenewal {
+		csrReason = "proactive"
+		if cert.Info.NotAfter != nil && time.Now().After(*cert.Info.NotAfter) {
+			csrReason = "expired"
+		}
+	}
+
+	csrLogCtx := CertificateLogContext{
+		Operation:       "csr_generation",
+		CertificateType: "management",
+		CertificateName: cert.Name,
+		DeviceName:      cert.Name,
+		Reason:          csrReason,
+	}
+	if csrIsRenewal && cert.Info.NotAfter != nil {
+		now := time.Now()
+		daysUntilExpiration := int(cert.Info.NotAfter.Sub(now).Hours() / 24)
+		csrLogCtx.DaysUntilExpiration = daysUntilExpiration
+	}
+	LogCertificateOperation(cm.log, csrLogCtx)
+
 	ready, crt, keyBytes, err := cert.Provisioner.Provision(ctx)
 	if err != nil {
+		csrLogCtx.Error = err
+		csrLogCtx.Success = false
+		LogCertificateOperation(cm.log, csrLogCtx)
 		return nil, err
 	}
+
+	// Log CSR submission
+	csrLogCtx.Operation = "csr_submission"
+	LogCertificateOperation(cm.log, csrLogCtx)
 
 	if !ready {
 		return &cm.requeueDelay, nil
@@ -403,11 +530,173 @@ func (cm *CertManager) ensureCertificate_do(ctx context.Context, providerName st
 		}
 	}
 
-	if err := cert.Storage.Write(crt, keyBytes); err != nil {
-		return nil, err
+	// Check if this is a renewal (certificate already exists)
+	isRenewal := cert.Info.NotAfter != nil && cert.Info.NotBefore != nil
+
+	var renewalStartTime time.Time
+	var renewalReason string
+	var logCtx CertificateLogContext
+	if isRenewal {
+		renewalStartTime = time.Now()
+		renewalReason = "proactive"
+		if cert.Info.NotAfter != nil && time.Now().After(*cert.Info.NotAfter) {
+			renewalReason = "expired"
+		}
+
+		// Calculate days until expiration for logging
+		daysUntilExpiration := 0
+		if cert.Info.NotAfter != nil {
+			now := time.Now()
+			daysUntilExpiration = int(cert.Info.NotAfter.Sub(now).Hours() / 24)
+		}
+
+		// Log renewal start
+		logCtx = CertificateLogContext{
+			Operation:           "renewal",
+			CertificateType:     "management",
+			CertificateName:     cert.Name,
+			DeviceName:          cert.Name, // Use certificate name as device identifier
+			Reason:              renewalReason,
+			ThresholdDays:       cm.config.Certificate.Renewal.ThresholdDays,
+			DaysUntilExpiration: daysUntilExpiration,
+		}
+		LogCertificateOperation(cm.log, logCtx)
+
+		// Record renewal attempt
+		if cm.metricsCollector != nil {
+			cm.metricsCollector.RecordRenewalAttempt("management", cert.Name, renewalReason)
+		}
+	}
+
+	if isRenewal {
+		// For renewals, write to pending location first
+		if err := cert.Storage.WritePending(crt, keyBytes); err != nil {
+			if cm.metricsCollector != nil {
+				duration := time.Since(renewalStartTime)
+				cm.metricsCollector.RecordRenewalFailure("management", cert.Name, renewalReason, duration)
+			}
+			logCtx.Duration = time.Since(renewalStartTime)
+			logCtx.Error = err
+			logCtx.Success = false
+			LogCertificateOperation(cm.log, logCtx)
+			return nil, fmt.Errorf("failed to write pending certificate: %w", err)
+		}
+		cm.log.Infof("Certificate %q/%q written to pending location for validation", providerName, cert.Name)
+
+		// Validate pending certificate before activation
+		// Get CA bundle path from config
+		caBundlePath := cm.getCABundlePath()
+		validator := NewCertificateValidator(caBundlePath, cert.Name, cm.log)
+
+		// Load pending certificate and key for validation
+		pendingCert, err := cert.Storage.LoadPendingCertificate(ctx)
+		if err != nil {
+			_ = cert.Storage.CleanupPending(ctx)
+			if cm.metricsCollector != nil {
+				duration := time.Since(renewalStartTime)
+				cm.metricsCollector.RecordRenewalFailure("management", cert.Name, renewalReason, duration)
+			}
+			logCtx.Duration = time.Since(renewalStartTime)
+			logCtx.Error = err
+			logCtx.Success = false
+			LogCertificateOperation(cm.log, logCtx)
+			return nil, fmt.Errorf("failed to load pending certificate: %w", err)
+		}
+
+		pendingKey, err := cert.Storage.LoadPendingKey(ctx)
+		if err != nil {
+			_ = cert.Storage.CleanupPending(ctx)
+			if cm.metricsCollector != nil {
+				duration := time.Since(renewalStartTime)
+				cm.metricsCollector.RecordRenewalFailure("management", cert.Name, renewalReason, duration)
+			}
+			logCtx.Duration = time.Since(renewalStartTime)
+			logCtx.Error = err
+			logCtx.Success = false
+			LogCertificateOperation(cm.log, logCtx)
+			return nil, fmt.Errorf("failed to load pending key: %w", err)
+		}
+
+		// Validate pending certificate
+		if err := validator.ValidatePendingCertificate(ctx, pendingCert, pendingKey, cm.readWriter); err != nil {
+			_ = cert.Storage.CleanupPending(ctx)
+			if cm.metricsCollector != nil {
+				duration := time.Since(renewalStartTime)
+				cm.metricsCollector.RecordRenewalFailure("management", cert.Name, renewalReason, duration)
+			}
+			logCtx.Duration = time.Since(renewalStartTime)
+			logCtx.Error = err
+			logCtx.Success = false
+			LogCertificateOperation(cm.log, logCtx)
+			return nil, fmt.Errorf("pending certificate validation failed: %w", err)
+		}
+
+		cm.log.Infof("Pending certificate validation successful for %q/%q", providerName, cert.Name)
+
+		// Perform atomic swap after validation
+		if err := cert.Storage.AtomicSwap(ctx); err != nil {
+			// Rollback already handled in AtomicSwap, but ensure cleanup
+			_ = cert.Storage.CleanupPending(ctx)
+
+			// Update lifecycle state to reflect failure
+			if cm.lifecycleManager != nil {
+				_ = cm.lifecycleManager.RecordError(ctx, providerName, cert.Name, err)
+				// State will be set to renewal_failed by RecordError
+				_ = cm.lifecycleManager.SetCertificateState(ctx, providerName, cert.Name, CertificateStateRenewalFailed)
+			}
+
+			if cm.metricsCollector != nil {
+				duration := time.Since(renewalStartTime)
+				cm.metricsCollector.RecordRenewalFailure("management", cert.Name, renewalReason, duration)
+			}
+			logCtx.Duration = time.Since(renewalStartTime)
+			logCtx.Error = err
+			logCtx.Success = false
+			LogCertificateOperation(cm.log, logCtx)
+			return nil, fmt.Errorf("failed to atomically swap certificate: %w", err)
+		}
+
+		cm.log.Infof("Certificate %q/%q atomically swapped to active location", providerName, cert.Name)
+
+		// Record renewal success metrics
+		if cm.metricsCollector != nil {
+			duration := time.Since(renewalStartTime)
+			cm.metricsCollector.RecordRenewalSuccess("management", cert.Name, renewalReason, duration)
+		}
+
+		// Log renewal success
+		logCtx.Duration = time.Since(renewalStartTime)
+		logCtx.Success = true
+		LogCertificateOperation(cm.log, logCtx)
+	} else {
+		// For initial provisioning, write directly to active location
+		if err := cert.Storage.Write(crt, keyBytes); err != nil {
+			return nil, err
+		}
 	}
 
 	cm.addCertificateInfo(cert, crt)
+
+	// Update lifecycle state based on renewal context
+	if cm.lifecycleManager != nil {
+		// Check if this was a renewal (state was "renewing")
+		currentState, err := cm.lifecycleManager.GetCertificateState(ctx, providerName, cert.Name)
+		if err == nil && currentState.GetState() == CertificateStateRenewing {
+			// Renewal completed successfully
+			// Calculate days until expiration for the new certificate
+			days, err := cm.expirationMonitor.CalculateDaysUntilExpiration(crt)
+			if err == nil {
+				_ = cm.lifecycleManager.UpdateCertificateState(ctx, providerName, cert.Name,
+					CertificateStateNormal, days, &crt.NotAfter)
+				cm.log.Infof("Certificate %q/%q renewal completed successfully", providerName, cert.Name)
+			} else {
+				_ = cm.lifecycleManager.SetCertificateState(ctx, providerName, cert.Name, CertificateStateNormal)
+			}
+		} else {
+			// Initial provisioning or other operation
+			_ = cm.lifecycleManager.SetCertificateState(ctx, providerName, cert.Name, CertificateStateNormal)
+		}
+	}
 
 	cert.Config = config
 	cert.Provisioner = nil
@@ -415,10 +704,137 @@ func (cm *CertManager) ensureCertificate_do(ctx context.Context, providerName st
 	return nil, nil
 }
 
+// getCABundlePath returns the CA bundle path from configuration.
+func (cm *CertManager) getCABundlePath() string {
+	if cm.config != nil && cm.config.ManagementService.Config.Service.CertificateAuthority != "" {
+		return cm.config.ManagementService.Config.Service.CertificateAuthority
+	}
+	// Default fallback
+	if cm.config != nil {
+		return filepath.Join(cm.config.ConfigDir, "certs", "ca.crt")
+	}
+	return "/etc/flightctl/certs/ca.crt"
+}
+
 // addCertificateInfo extracts and stores certificate information from a parsed X.509 certificate.
 func (cm *CertManager) addCertificateInfo(cert *certificate, parsedCert *x509.Certificate) {
 	cert.Info.NotBefore = &parsedCert.NotBefore
 	cert.Info.NotAfter = &parsedCert.NotAfter
+
+	// Record expiration metrics
+	if cm.metricsCollector != nil {
+		now := time.Now()
+		daysUntilExpiration := int(parsedCert.NotAfter.Sub(now).Hours() / 24)
+		cm.metricsCollector.RecordCertificateExpiration("management", cert.Name, parsedCert.NotAfter, daysUntilExpiration)
+	}
+}
+
+// shouldRenewCertificate determines if a certificate needs renewal based on expiration threshold.
+// Returns true if renewal is needed, days until expiration, and any error.
+func (cm *CertManager) shouldRenewCertificate(ctx context.Context, providerName string, cert *certificate, thresholdDays int) (bool, int, error) {
+	if cm.lifecycleManager == nil {
+		return false, 0, fmt.Errorf("lifecycle manager not initialized")
+	}
+
+	if thresholdDays < 0 {
+		return false, 0, fmt.Errorf("threshold days must be non-negative, got %d", thresholdDays)
+	}
+
+	// Use lifecycle manager to check if renewal is needed
+	needsRenewal, days, err := cm.lifecycleManager.CheckRenewal(ctx, providerName, cert.Name, thresholdDays)
+	if err != nil {
+		return false, 0, fmt.Errorf("failed to check renewal: %w", err)
+	}
+
+	return needsRenewal, days, nil
+}
+
+// triggerRenewal initiates the certificate renewal process.
+// It sets the certificate state to "renewing" and queues the certificate for renewal.
+func (cm *CertManager) triggerRenewal(ctx context.Context, providerName string, cert *certificate, cfg provider.CertificateConfig) error {
+	if cm.lifecycleManager == nil {
+		return fmt.Errorf("lifecycle manager not initialized")
+	}
+
+	// Set certificate state to "renewing"
+	if err := cm.lifecycleManager.SetCertificateState(ctx, providerName, cert.Name, CertificateStateRenewing); err != nil {
+		cm.log.Warnf("Failed to set certificate state to renewing for %q/%q: %v", providerName, cert.Name, err)
+		// Continue anyway - state update failure shouldn't block renewal
+	}
+
+	// Queue certificate for renewal
+	// Note: We use the same provisioning queue, but with renewal context
+	// The CSR provisioner will handle renewal-specific logic in the next story
+	if err := cm.provisionCertificate(ctx, providerName, cert, cfg); err != nil {
+		// If queuing fails, reset state
+		_ = cm.lifecycleManager.SetCertificateState(ctx, providerName, cert.Name, CertificateStateExpiringSoon)
+		return fmt.Errorf("failed to queue certificate for renewal: %w", err)
+	}
+
+	cm.log.Infof("Triggered renewal for certificate %q/%q", providerName, cert.Name)
+	return nil
+}
+
+// GetLifecycleManager returns the lifecycle manager for certificate operations.
+func (cm *CertManager) GetLifecycleManager() *LifecycleManager {
+	return cm.lifecycleManager
+}
+
+// CheckIncompleteSwaps checks for and recovers from incomplete certificate swaps.
+// This should be called on agent startup.
+func (cm *CertManager) CheckIncompleteSwaps(ctx context.Context) error {
+	cm.log.Debug("Checking for incomplete certificate swaps")
+
+	// Get list of providers
+	providers, err := cm.certificates.ListProviderNames()
+	if err != nil {
+		return fmt.Errorf("failed to list provider names: %w", err)
+	}
+
+	// Iterate through all certificates
+	for _, providerName := range providers {
+		certs, err := cm.certificates.ReadCertificates(providerName)
+		if err != nil {
+			cm.log.Warnf("Failed to read certificates for provider %q: %v", providerName, err)
+			continue
+		}
+
+		for _, cert := range certs {
+			// Initialize storage if needed
+			if cert.Storage == nil {
+				storage, err := cm.initStorageProvider(cert.Config)
+				if err != nil {
+					cm.log.Warnf("Failed to init storage for %q/%q: %v", providerName, cert.Name, err)
+					continue
+				}
+				cert.Storage = storage
+			}
+
+			// Check if certificate has pending files
+			hasPending, err := cert.Storage.HasPendingCertificate(ctx)
+			if err != nil {
+				cm.log.Warnf("Failed to check pending certificate for %q/%q: %v", providerName, cert.Name, err)
+				continue
+			}
+
+			if hasPending {
+				cm.log.Warnf("Detected incomplete swap for certificate %q/%q", providerName, cert.Name)
+
+				// Create validator and attempt recovery
+				caBundlePath := cm.getCABundlePath()
+				validator := NewCertificateValidator(caBundlePath, cert.Name, cm.log)
+
+				if err := validator.DetectAndRecoverIncompleteSwap(ctx, cert.Storage); err != nil {
+					cm.log.Errorf("Failed to recover incomplete swap for %q/%q: %v", providerName, cert.Name, err)
+					// Continue with other certificates
+				} else {
+					cm.log.Infof("Recovered incomplete swap for certificate %q/%q", providerName, cert.Name)
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // cleanupUntrackedProviders removes certificate providers that are no longer configured.
@@ -551,4 +967,191 @@ func (cm *CertManager) purgeStorage(ctx context.Context, providerName string, ce
 	}
 
 	return nil
+}
+
+// CheckCertificateExpiration checks the expiration status of a certificate.
+// Returns days until expiration, expiration time, and any error.
+func (cm *CertManager) CheckCertificateExpiration(ctx context.Context, providerName, certName string) (int, *time.Time, error) {
+	cert, err := cm.certificates.ReadCertificate(providerName, certName)
+	if err != nil {
+		return 0, nil, fmt.Errorf("certificate %q from provider %q not found: %w", certName, providerName, err)
+	}
+
+	cert.mu.RLock()
+	hasExpirationInfo := cert.Info.NotAfter != nil
+	cert.mu.RUnlock()
+
+	// Try to load certificate from storage if not already loaded
+	if !hasExpirationInfo {
+		cert.mu.Lock()
+		if cert.Storage == nil {
+			// Initialize storage if needed
+			storage, err := cm.initStorageProvider(cert.Config)
+			if err != nil {
+				cert.mu.Unlock()
+				return 0, nil, fmt.Errorf("failed to init storage: %w", err)
+			}
+			cert.Storage = storage
+		}
+		cert.mu.Unlock()
+
+		// Load certificate from storage
+		x509Cert, err := cert.Storage.LoadCertificate(ctx)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to load certificate: %w", err)
+		}
+
+		// Update certificate info
+		cert.mu.Lock()
+		cert.Info.NotBefore = &x509Cert.NotBefore
+		cert.Info.NotAfter = &x509Cert.NotAfter
+		cert.mu.Unlock()
+
+		// Persist updated info
+		if err := cm.certificates.StoreCertificate(providerName, cert); err != nil {
+			cm.log.Warnf("failed to store certificate info: %v", err)
+		}
+	}
+
+	// Parse certificate expiration
+	cert.mu.RLock()
+	notAfter := cert.Info.NotAfter
+	cert.mu.RUnlock()
+
+	if notAfter == nil {
+		return 0, nil, fmt.Errorf("certificate has no expiration date")
+	}
+
+	// Calculate days until expiration
+	days, err := cm.expirationMonitor.CalculateDaysUntilExpiration(&x509.Certificate{
+		NotAfter: *notAfter,
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+
+	return days, notAfter, nil
+}
+
+// CheckAllCertificatesExpiration checks expiration for all managed certificates.
+// This method is intended to be called periodically.
+func (cm *CertManager) CheckAllCertificatesExpiration(ctx context.Context) error {
+	providers, err := cm.certificates.ListProviderNames()
+	if err != nil {
+		return fmt.Errorf("failed to list provider names: %w", err)
+	}
+
+	for _, providerName := range providers {
+		certs, err := cm.certificates.ReadCertificates(providerName)
+		if err != nil {
+			cm.log.Warnf("failed to read certificates for provider %q: %v", providerName, err)
+			continue
+		}
+
+		for _, cert := range certs {
+			days, expiration, err := cm.CheckCertificateExpiration(ctx, providerName, cert.Name)
+			if err != nil {
+				cm.log.Warnf("failed to check expiration for certificate %q from provider %q: %v",
+					cert.Name, providerName, err)
+				continue
+			}
+
+			if days < 0 {
+				cm.log.Warnf("certificate %q from provider %q expired %d days ago (expired: %v)",
+					cert.Name, providerName, -days, expiration)
+			} else {
+				cm.log.Debugf("certificate %q from provider %q expires in %d days (expires: %v)",
+					cert.Name, providerName, days, expiration)
+			}
+		}
+	}
+
+	return nil
+}
+
+// StartPeriodicExpirationCheck starts a goroutine that periodically checks certificate expiration.
+// The check interval is configurable via the checkInterval parameter.
+// The goroutine stops when ctx is cancelled.
+func (cm *CertManager) StartPeriodicExpirationCheck(ctx context.Context, checkInterval time.Duration) {
+	if checkInterval <= 0 {
+		cm.log.Warnf("invalid check interval %v, using default 24h", checkInterval)
+		checkInterval = 24 * time.Hour
+	}
+
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	// Check immediately on startup
+	if err := cm.CheckAllCertificatesExpiration(ctx); err != nil {
+		cm.log.Warnf("initial expiration check failed: %v", err)
+	}
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				cm.log.Debug("stopping periodic expiration check")
+				return
+			case <-ticker.C:
+				if err := cm.CheckAllCertificatesExpiration(ctx); err != nil {
+					cm.log.Warnf("periodic expiration check failed: %v", err)
+				}
+			}
+		}
+	}()
+}
+
+// CheckExpiredCertificatesOnStartup checks for expired certificates on agent startup.
+// This should be called during agent initialization.
+func (cm *CertManager) CheckExpiredCertificatesOnStartup(ctx context.Context) error {
+	if cm.lifecycleManager == nil {
+		return nil // No lifecycle manager - skip check
+	}
+
+	cm.log.Debug("Checking for expired certificates on startup")
+
+	// Check all certificates
+	if err := cm.lifecycleManager.CheckExpiredCertificates(ctx); err != nil {
+		cm.log.Warnf("Failed to check expired certificates on startup: %v", err)
+		return err
+	}
+
+	return nil
+}
+
+// StartExpirationMonitoring starts a goroutine that periodically checks for expired certificates.
+func (cm *CertManager) StartExpirationMonitoring(ctx context.Context) {
+	if cm.lifecycleManager == nil {
+		return // No lifecycle manager - skip monitoring
+	}
+
+	checkInterval := 24 * time.Hour // Default: check daily
+	if cm.config != nil {
+		checkInterval = time.Duration(cm.config.Certificate.Renewal.CheckInterval)
+		if checkInterval == 0 {
+			checkInterval = 24 * time.Hour
+		}
+	}
+
+	go func() {
+		ticker := time.NewTicker(checkInterval)
+		defer ticker.Stop()
+
+		// Check immediately on startup
+		if err := cm.lifecycleManager.CheckExpiredCertificates(ctx); err != nil {
+			cm.log.Warnf("Failed to check expired certificates: %v", err)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				cm.log.Debug("Expiration monitoring stopped")
+				return
+			case <-ticker.C:
+				if err := cm.lifecycleManager.CheckExpiredCertificates(ctx); err != nil {
+					cm.log.Warnf("Failed to check expired certificates: %v", err)
+				}
+			}
+		}
+	}()
 }

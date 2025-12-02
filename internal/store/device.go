@@ -89,6 +89,16 @@ type Device interface {
 
 	// Used for restoration
 	GetAllDeviceNames(ctx context.Context, orgId uuid.UUID) ([]string, error)
+
+	// Certificate tracking methods
+	UpdateCertificateExpiration(ctx context.Context, orgId uuid.UUID, deviceName string, expiration *time.Time) error
+	UpdateCertificateRenewalInfo(ctx context.Context, orgId uuid.UUID, deviceName string, lastRenewed *time.Time, renewalCount int, fingerprint *string) error
+	UpdateCertificateFingerprint(ctx context.Context, orgId uuid.UUID, deviceName string, fingerprint string) error
+	GetCertificateExpiration(ctx context.Context, orgId uuid.UUID, deviceName string) (*time.Time, error)
+	GetCertificateRenewalCount(ctx context.Context, orgId uuid.UUID, deviceName string) (int, error)
+	UpdateCertificateTracking(ctx context.Context, orgId uuid.UUID, deviceName string, expiration *time.Time, fingerprint *string, lastRenewed *time.Time, renewalCount *int) error
+	ListDevicesExpiringSoon(ctx context.Context, orgId uuid.UUID, thresholdDate time.Time) ([]*api.Device, error)
+	ListDevicesWithExpiredCertificates(ctx context.Context, orgId uuid.UUID) ([]*api.Device, error)
 }
 type DeviceStore struct {
 	dbHandler    *gorm.DB
@@ -179,6 +189,20 @@ func (s *DeviceStore) InitialMigration(ctx context.Context) error {
 	}
 
 	if err := s.dropLastSeenColumnIfExists(db); err != nil {
+		return err
+	}
+
+	// Add certificate tracking fields
+	if err := s.addCertificateTrackingFields(db); err != nil {
+		return err
+	}
+
+	// Create certificate tracking indexes
+	if err := s.createCertificateExpirationIndex(db); err != nil {
+		return err
+	}
+
+	if err := s.createCertificateLastRenewedIndex(db); err != nil {
 		return err
 	}
 
@@ -347,6 +371,99 @@ func (s *DeviceStore) createDeviceTimestampInsertTrigger(db *gorm.DB) error {
 func (s *DeviceStore) backfillDeviceTimestamps(db *gorm.DB) error {
 	return db.Exec(`INSERT INTO device_timestamps (org_id, name) 
 		SELECT org_id, name FROM devices WHERE (org_id, name) NOT IN (SELECT org_id, name FROM device_timestamps)`).Error
+}
+
+// addCertificateTrackingFields adds certificate tracking columns to the devices table.
+func (s *DeviceStore) addCertificateTrackingFields(db *gorm.DB) error {
+	if db.Dialector.Name() != "postgres" {
+		// For non-PostgreSQL databases, use GORM AutoMigrate
+		// GORM will handle the migration automatically
+		return nil
+	}
+
+	// Check if columns already exist to make migration idempotent
+	hasExpiration := db.Migrator().HasColumn(&model.Device{}, "certificate_expiration")
+	hasLastRenewed := db.Migrator().HasColumn(&model.Device{}, "certificate_last_renewed")
+	hasRenewalCount := db.Migrator().HasColumn(&model.Device{}, "certificate_renewal_count")
+	hasFingerprint := db.Migrator().HasColumn(&model.Device{}, "certificate_fingerprint")
+
+	if !hasExpiration {
+		if err := db.Exec("ALTER TABLE devices ADD COLUMN certificate_expiration TIMESTAMP").Error; err != nil {
+			return fmt.Errorf("failed to add certificate_expiration column: %w", err)
+		}
+		s.log.Info("Added certificate_expiration column to devices table")
+	}
+
+	if !hasLastRenewed {
+		if err := db.Exec("ALTER TABLE devices ADD COLUMN certificate_last_renewed TIMESTAMP").Error; err != nil {
+			return fmt.Errorf("failed to add certificate_last_renewed column: %w", err)
+		}
+		s.log.Info("Added certificate_last_renewed column to devices table")
+	}
+
+	if !hasRenewalCount {
+		if err := db.Exec("ALTER TABLE devices ADD COLUMN certificate_renewal_count INTEGER DEFAULT 0").Error; err != nil {
+			return fmt.Errorf("failed to add certificate_renewal_count column: %w", err)
+		}
+		s.log.Info("Added certificate_renewal_count column to devices table")
+	}
+
+	if !hasFingerprint {
+		if err := db.Exec("ALTER TABLE devices ADD COLUMN certificate_fingerprint TEXT").Error; err != nil {
+			return fmt.Errorf("failed to add certificate_fingerprint column: %w", err)
+		}
+		s.log.Info("Added certificate_fingerprint column to devices table")
+	}
+
+	return nil
+}
+
+// createCertificateExpirationIndex creates an index on certificate_expiration for efficient queries.
+func (s *DeviceStore) createCertificateExpirationIndex(db *gorm.DB) error {
+	if db.Dialector.Name() != "postgres" {
+		// For non-PostgreSQL, use GORM index creation
+		if !db.Migrator().HasIndex(&model.Device{}, "idx_devices_cert_expiration") {
+			return db.Migrator().CreateIndex(&model.Device{}, "CertificateExpiration")
+		}
+		return nil
+	}
+
+	// Create partial index for PostgreSQL (only indexes non-null values)
+	if !db.Migrator().HasIndex(&model.Device{}, "idx_devices_cert_expiration") {
+		if err := db.Exec(`
+			CREATE INDEX idx_devices_cert_expiration 
+			ON devices(certificate_expiration) 
+			WHERE certificate_expiration IS NOT NULL
+		`).Error; err != nil {
+			return fmt.Errorf("failed to create certificate expiration index: %w", err)
+		}
+		s.log.Info("Created idx_devices_cert_expiration index")
+	}
+	return nil
+}
+
+// createCertificateLastRenewedIndex creates an index on certificate_last_renewed for efficient queries.
+func (s *DeviceStore) createCertificateLastRenewedIndex(db *gorm.DB) error {
+	if db.Dialector.Name() != "postgres" {
+		// For non-PostgreSQL, use GORM index creation
+		if !db.Migrator().HasIndex(&model.Device{}, "idx_devices_cert_last_renewed") {
+			return db.Migrator().CreateIndex(&model.Device{}, "CertificateLastRenewed")
+		}
+		return nil
+	}
+
+	// Create partial index for PostgreSQL (only indexes non-null values)
+	if !db.Migrator().HasIndex(&model.Device{}, "idx_devices_cert_last_renewed") {
+		if err := db.Exec(`
+			CREATE INDEX idx_devices_cert_last_renewed 
+			ON devices(certificate_last_renewed) 
+			WHERE certificate_last_renewed IS NOT NULL
+		`).Error; err != nil {
+			return fmt.Errorf("failed to create certificate last renewed index: %w", err)
+		}
+		s.log.Info("Created idx_devices_cert_last_renewed index")
+	}
+	return nil
 }
 
 func (s *DeviceStore) dropLastSeenColumnIfExists(db *gorm.DB) error {
@@ -1376,6 +1493,202 @@ func (s *DeviceStore) RemoveConflictPausedAnnotation(ctx context.Context, orgId 
 	})
 
 	return affectedRows, deviceIDs, err
+}
+
+// UpdateCertificateExpiration updates the certificate expiration date for a device.
+func (s *DeviceStore) UpdateCertificateExpiration(ctx context.Context, orgId uuid.UUID, deviceName string, expiration *time.Time) error {
+	db := s.getDB(ctx)
+
+	result := db.Model(&model.Device{}).
+		Where("org_id = ? AND name = ?", orgId, deviceName).
+		Update("certificate_expiration", expiration)
+
+	if result.Error != nil {
+		return ErrorFromGormError(result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		return flterrors.ErrResourceNotFound
+	}
+
+	return nil
+}
+
+// UpdateCertificateRenewalInfo updates certificate renewal tracking information.
+func (s *DeviceStore) UpdateCertificateRenewalInfo(ctx context.Context, orgId uuid.UUID, deviceName string, lastRenewed *time.Time, renewalCount int, fingerprint *string) error {
+	db := s.getDB(ctx)
+
+	updates := map[string]interface{}{
+		"certificate_last_renewed":  lastRenewed,
+		"certificate_renewal_count": renewalCount,
+	}
+
+	if fingerprint != nil {
+		updates["certificate_fingerprint"] = fingerprint
+	}
+
+	result := db.Model(&model.Device{}).
+		Where("org_id = ? AND name = ?", orgId, deviceName).
+		Updates(updates)
+
+	if result.Error != nil {
+		return ErrorFromGormError(result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		return flterrors.ErrResourceNotFound
+	}
+
+	return nil
+}
+
+// GetCertificateExpiration retrieves the certificate expiration date for a device.
+func (s *DeviceStore) GetCertificateExpiration(ctx context.Context, orgId uuid.UUID, deviceName string) (*time.Time, error) {
+	db := s.getDB(ctx)
+
+	var device model.Device
+	result := db.Select("certificate_expiration").
+		Where("org_id = ? AND name = ?", orgId, deviceName).
+		First(&device)
+
+	if result.Error != nil {
+		if result.Error == gorm.ErrRecordNotFound {
+			return nil, flterrors.ErrResourceNotFound
+		}
+		return nil, ErrorFromGormError(result.Error)
+	}
+
+	return device.CertificateExpiration, nil
+}
+
+// UpdateCertificateFingerprint updates the certificate fingerprint for a device.
+func (s *DeviceStore) UpdateCertificateFingerprint(ctx context.Context, orgId uuid.UUID, deviceName string, fingerprint string) error {
+	db := s.getDB(ctx)
+
+	result := db.Model(&model.Device{}).
+		Where("org_id = ? AND name = ?", orgId, deviceName).
+		Update("certificate_fingerprint", fingerprint)
+
+	if result.Error != nil {
+		return ErrorFromGormError(result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		return flterrors.ErrResourceNotFound
+	}
+
+	return nil
+}
+
+// GetCertificateRenewalCount retrieves the certificate renewal count for a device.
+func (s *DeviceStore) GetCertificateRenewalCount(ctx context.Context, orgId uuid.UUID, deviceName string) (int, error) {
+	db := s.getDB(ctx)
+
+	var device model.Device
+	result := db.Select("certificate_renewal_count").
+		Where("org_id = ? AND name = ?", orgId, deviceName).
+		First(&device)
+
+	if result.Error != nil {
+		if result.Error == gorm.ErrRecordNotFound {
+			return 0, flterrors.ErrResourceNotFound
+		}
+		return 0, ErrorFromGormError(result.Error)
+	}
+
+	return device.CertificateRenewalCount, nil
+}
+
+// UpdateCertificateTracking updates all certificate tracking fields in a transaction.
+func (s *DeviceStore) UpdateCertificateTracking(ctx context.Context, orgId uuid.UUID, deviceName string, expiration *time.Time, fingerprint *string, lastRenewed *time.Time, renewalCount *int) error {
+	db := s.getDB(ctx)
+
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		updates := map[string]interface{}{}
+
+		if expiration != nil {
+			updates["certificate_expiration"] = expiration
+		}
+		if fingerprint != nil {
+			updates["certificate_fingerprint"] = fingerprint
+		}
+		if lastRenewed != nil {
+			updates["certificate_last_renewed"] = lastRenewed
+		}
+		if renewalCount != nil {
+			updates["certificate_renewal_count"] = *renewalCount
+		}
+
+		if len(updates) == 0 {
+			// No updates to perform
+			return nil
+		}
+
+		result := tx.Model(&model.Device{}).
+			Where("org_id = ? AND name = ?", orgId, deviceName).
+			Updates(updates)
+
+		if result.Error != nil {
+			return ErrorFromGormError(result.Error)
+		}
+
+		if result.RowsAffected == 0 {
+			return flterrors.ErrResourceNotFound
+		}
+
+		return nil
+	})
+}
+
+// ListDevicesExpiringSoon lists devices with certificates expiring within the specified threshold.
+func (s *DeviceStore) ListDevicesExpiringSoon(ctx context.Context, orgId uuid.UUID, thresholdDate time.Time) ([]*api.Device, error) {
+	db := s.getDB(ctx)
+
+	var devices []model.Device
+	result := db.Where("org_id = ? AND certificate_expiration IS NOT NULL AND certificate_expiration <= ?",
+		orgId, thresholdDate).
+		Find(&devices)
+
+	if result.Error != nil {
+		return nil, ErrorFromGormError(result.Error)
+	}
+
+	apiDevices := make([]*api.Device, len(devices))
+	for i, device := range devices {
+		apiDevice, err := device.ToApiResource()
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert device %s to API resource: %w", device.Name, err)
+		}
+		apiDevices[i] = apiDevice
+	}
+
+	return apiDevices, nil
+}
+
+// ListDevicesWithExpiredCertificates lists devices with expired certificates.
+func (s *DeviceStore) ListDevicesWithExpiredCertificates(ctx context.Context, orgId uuid.UUID) ([]*api.Device, error) {
+	db := s.getDB(ctx)
+	now := time.Now().UTC()
+
+	var devices []model.Device
+	result := db.Where("org_id = ? AND certificate_expiration IS NOT NULL AND certificate_expiration < ?",
+		orgId, now).
+		Find(&devices)
+
+	if result.Error != nil {
+		return nil, ErrorFromGormError(result.Error)
+	}
+
+	apiDevices := make([]*api.Device, len(devices))
+	for i, device := range devices {
+		apiDevice, err := device.ToApiResource()
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert device %s to API resource: %w", device.Name, err)
+		}
+		apiDevices[i] = apiDevice
+	}
+
+	return apiDevices, nil
 }
 
 // GetAllDeviceNames returns all device names for a given organization

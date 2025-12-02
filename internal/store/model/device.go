@@ -41,6 +41,19 @@ type Device struct {
 	Repositories []Repository `gorm:"many2many:device_repos;constraint:OnDelete:CASCADE;"`
 
 	DeviceTimestamp DeviceTimestamp `gorm:"foreignKey:OrgID,Name;references:OrgID,Name;constraint:OnDelete:CASCADE"`
+
+	// Certificate tracking fields
+	// CertificateExpiration is when the device's management certificate expires
+	CertificateExpiration *time.Time `gorm:"type:timestamp" json:"certificate_expiration,omitempty"`
+
+	// CertificateLastRenewed is when the certificate was last renewed
+	CertificateLastRenewed *time.Time `gorm:"type:timestamp" json:"certificate_last_renewed,omitempty"`
+
+	// CertificateRenewalCount is the number of times the certificate has been renewed
+	CertificateRenewalCount int `gorm:"default:0" json:"certificate_renewal_count,omitempty"`
+
+	// CertificateFingerprint is the fingerprint of the current certificate
+	CertificateFingerprint *string `gorm:"type:text" json:"certificate_fingerprint,omitempty"`
 }
 
 type DeviceTimestamp struct {

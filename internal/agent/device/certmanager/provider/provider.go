@@ -56,6 +56,23 @@ type StorageProvider interface {
 	LoadCertificate(ctx context.Context) (*x509.Certificate, error)
 	// Write stores a certificate and private key to storage
 	Write(cert *x509.Certificate, keyPEM []byte) error
+	// WritePending stores a certificate and private key to pending locations.
+	// This allows validation before activation. The old certificate remains in the active location.
+	WritePending(cert *x509.Certificate, keyPEM []byte) error
+	// LoadPendingCertificate loads a pending certificate from storage.
+	LoadPendingCertificate(ctx context.Context) (*x509.Certificate, error)
+	// LoadPendingKey loads the pending private key from storage.
+	LoadPendingKey(ctx context.Context) ([]byte, error)
+	// HasPendingCertificate checks if a pending certificate exists.
+	HasPendingCertificate(ctx context.Context) (bool, error)
+	// CleanupPending removes pending certificate and key files.
+	CleanupPending(ctx context.Context) error
+	// AtomicSwap performs an atomic swap of pending certificate to active location.
+	// It uses POSIX atomic rename operations to ensure the swap is atomic.
+	AtomicSwap(ctx context.Context) error
+	// RollbackSwap performs a rollback of a failed certificate swap.
+	// It restores the old certificate from backup and cleans up pending files.
+	RollbackSwap(ctx context.Context, swapError error) error
 	// Delete removes a certificate from storage
 	Delete(ctx context.Context) error
 }

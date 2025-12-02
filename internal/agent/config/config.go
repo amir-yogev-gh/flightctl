@@ -70,6 +70,42 @@ const (
 	DefaultMetricsEnabled = false
 	// DefaultProfilingEnabled controls whether runtime profiling (pprof) is enabled by default.
 	DefaultProfilingEnabled = false
+
+	// DefaultCertificateRenewalEnabled controls whether certificate renewal is enabled by default
+	DefaultCertificateRenewalEnabled = true
+
+	// DefaultCertificateRenewalThresholdDays is the default number of days before expiration to trigger renewal
+	DefaultCertificateRenewalThresholdDays = 30
+
+	// DefaultCertificateRenewalCheckInterval is the default interval for checking certificate expiration
+	DefaultCertificateRenewalCheckInterval = util.Duration(24 * time.Hour)
+
+	// DefaultCertificateRenewalRetryInterval is the default interval between renewal retry attempts
+	DefaultCertificateRenewalRetryInterval = util.Duration(1 * time.Hour)
+
+	// DefaultCertificateRenewalMaxRetries is the default maximum number of renewal retry attempts
+	DefaultCertificateRenewalMaxRetries = 10
+
+	// DefaultCertificateRenewalBackoffMultiplier is the default exponential backoff multiplier
+	DefaultCertificateRenewalBackoffMultiplier = 2.0
+
+	// DefaultCertificateRenewalMaxBackoff is the default maximum backoff duration
+	DefaultCertificateRenewalMaxBackoff = util.Duration(24 * time.Hour)
+
+	// MinCertificateRenewalThresholdDays is the minimum allowed threshold days
+	MinCertificateRenewalThresholdDays = 1
+
+	// MaxCertificateRenewalThresholdDays is the maximum allowed threshold days
+	MaxCertificateRenewalThresholdDays = 365
+
+	// MinCertificateRenewalCheckInterval is the minimum allowed check interval
+	MinCertificateRenewalCheckInterval = util.Duration(1 * time.Hour)
+
+	// MinCertificateRenewalRetryInterval is the minimum allowed retry interval
+	MinCertificateRenewalRetryInterval = util.Duration(1 * time.Minute)
+
+	// MinCertificateRenewalBackoffMultiplier is the minimum allowed backoff multiplier
+	MinCertificateRenewalBackoffMultiplier = 1.0
 )
 
 type Config struct {
@@ -89,6 +125,9 @@ type Config struct {
 
 	// TPM holds all TPM-related configuration
 	TPM TPM `json:"tpm,omitempty"`
+
+	// Certificate holds certificate management configuration
+	Certificate CertificateConfig `json:"certificate,omitempty"`
 
 	// AuditLog holds all audit logging configuration
 	AuditLog audit.AuditConfig `json:"audit,omitempty"`
@@ -150,6 +189,95 @@ type TPM struct {
 	StorageFilePath string `json:"storage-file-path,omitempty"`
 }
 
+// CertificateRenewalConfig holds configuration for certificate renewal.
+type CertificateRenewalConfig struct {
+	// Enabled controls whether certificate renewal is enabled
+	Enabled bool `json:"enabled,omitempty"`
+	// ThresholdDays is the number of days before expiration to trigger renewal
+	ThresholdDays int `json:"threshold-days,omitempty"`
+	// CheckInterval is how often to check certificate expiration
+	CheckInterval util.Duration `json:"check-interval,omitempty"`
+	// RetryInterval is the interval between renewal retry attempts
+	RetryInterval util.Duration `json:"retry-interval,omitempty"`
+	// MaxRetries is the maximum number of renewal retry attempts
+	MaxRetries int `json:"max-retries,omitempty"`
+	// BackoffMultiplier is the exponential backoff multiplier for retries
+	BackoffMultiplier float64 `json:"backoff-multiplier,omitempty"`
+	// MaxBackoff is the maximum backoff duration between retries
+	MaxBackoff util.Duration `json:"max-backoff,omitempty"`
+}
+
+// DefaultCertificateRenewalConfig returns a CertificateRenewalConfig with default values.
+func DefaultCertificateRenewalConfig() CertificateRenewalConfig {
+	return CertificateRenewalConfig{
+		Enabled:           DefaultCertificateRenewalEnabled,
+		ThresholdDays:     DefaultCertificateRenewalThresholdDays,
+		CheckInterval:     DefaultCertificateRenewalCheckInterval,
+		RetryInterval:     DefaultCertificateRenewalRetryInterval,
+		MaxRetries:        DefaultCertificateRenewalMaxRetries,
+		BackoffMultiplier: DefaultCertificateRenewalBackoffMultiplier,
+		MaxBackoff:        DefaultCertificateRenewalMaxBackoff,
+	}
+}
+
+// Validate validates the certificate renewal configuration.
+func (c *CertificateRenewalConfig) Validate() error {
+	if c.ThresholdDays < MinCertificateRenewalThresholdDays {
+		return fmt.Errorf("threshold-days must be at least %d, got %d",
+			MinCertificateRenewalThresholdDays, c.ThresholdDays)
+	}
+
+	if c.ThresholdDays > MaxCertificateRenewalThresholdDays {
+		return fmt.Errorf("threshold-days must be at most %d, got %d",
+			MaxCertificateRenewalThresholdDays, c.ThresholdDays)
+	}
+
+	if time.Duration(c.CheckInterval) <= 0 {
+		return fmt.Errorf("check-interval must be positive, got %v", c.CheckInterval)
+	}
+
+	if time.Duration(c.CheckInterval) < time.Duration(MinCertificateRenewalCheckInterval) {
+		return fmt.Errorf("check-interval must be at least %v, got %v",
+			MinCertificateRenewalCheckInterval, c.CheckInterval)
+	}
+
+	if time.Duration(c.RetryInterval) <= 0 {
+		return fmt.Errorf("retry-interval must be positive, got %v", c.RetryInterval)
+	}
+
+	if time.Duration(c.RetryInterval) < time.Duration(MinCertificateRenewalRetryInterval) {
+		return fmt.Errorf("retry-interval must be at least %v, got %v",
+			MinCertificateRenewalRetryInterval, c.RetryInterval)
+	}
+
+	if c.MaxRetries < 0 {
+		return fmt.Errorf("max-retries must be non-negative, got %d", c.MaxRetries)
+	}
+
+	if c.BackoffMultiplier < MinCertificateRenewalBackoffMultiplier {
+		return fmt.Errorf("backoff-multiplier must be at least %v, got %v",
+			MinCertificateRenewalBackoffMultiplier, c.BackoffMultiplier)
+	}
+
+	if time.Duration(c.MaxBackoff) <= 0 {
+		return fmt.Errorf("max-backoff must be positive, got %v", c.MaxBackoff)
+	}
+
+	// Ensure max backoff is not less than retry interval
+	if time.Duration(c.MaxBackoff) < time.Duration(c.RetryInterval) {
+		return fmt.Errorf("max-backoff (%v) must be at least retry-interval (%v)",
+			c.MaxBackoff, c.RetryInterval)
+	}
+
+	return nil
+}
+
+// CertificateConfig holds all certificate-related configuration.
+type CertificateConfig struct {
+	// Renewal holds certificate renewal configuration
+	Renewal CertificateRenewalConfig `json:"renewal,omitempty"`
+}
+
 // DefaultSystemInfo defines the list of system information keys that are included
 // in the default system info statud report generated by the agent.
 var DefaultSystemInfo = []string{
@@ -186,6 +314,9 @@ func NewDefault() *Config {
 			AuthEnabled:     false,
 			DevicePath:      DefaultTPMDevicePath,
 			StorageFilePath: filepath.Join(DefaultDataDir, DefaultTPMKeyFile),
+		},
+		Certificate: CertificateConfig{
+			Renewal: DefaultCertificateRenewalConfig(),
 		},
 		AuditLog: *audit.NewDefaultAuditConfig(),
 	}
@@ -254,6 +385,42 @@ func (cfg *Config) Complete() error {
 		cfg.ManagementService.Config = *cfg.EnrollmentService.Config.DeepCopy()
 		cfg.ManagementService.Config.AuthInfo = baseclient.AuthInfo{}
 	}
+
+	// Complete certificate renewal configuration
+	// Use a default config and merge non-zero values
+	defaultRenewal := DefaultCertificateRenewalConfig()
+
+	// If renewal config looks uninitialized (both CheckInterval and ThresholdDays are zero),
+	// use all defaults
+	if cfg.Certificate.Renewal.CheckInterval == 0 &&
+		cfg.Certificate.Renewal.ThresholdDays == 0 {
+		// Looks like renewal config wasn't set at all, use defaults
+		cfg.Certificate.Renewal = defaultRenewal
+	} else {
+		// Some fields were set, fill in missing ones
+		if cfg.Certificate.Renewal.ThresholdDays == 0 {
+			cfg.Certificate.Renewal.ThresholdDays = defaultRenewal.ThresholdDays
+		}
+		if cfg.Certificate.Renewal.CheckInterval == 0 {
+			cfg.Certificate.Renewal.CheckInterval = defaultRenewal.CheckInterval
+		}
+		if cfg.Certificate.Renewal.RetryInterval == 0 {
+			cfg.Certificate.Renewal.RetryInterval = defaultRenewal.RetryInterval
+		}
+		if cfg.Certificate.Renewal.MaxRetries == 0 {
+			cfg.Certificate.Renewal.MaxRetries = defaultRenewal.MaxRetries
+		}
+		if cfg.Certificate.Renewal.BackoffMultiplier == 0 {
+			cfg.Certificate.Renewal.BackoffMultiplier = defaultRenewal.BackoffMultiplier
+		}
+		if cfg.Certificate.Renewal.MaxBackoff == 0 {
+			cfg.Certificate.Renewal.MaxBackoff = defaultRenewal.MaxBackoff
+		}
+		// Enabled defaults to true if not explicitly set
+		// Since we can't distinguish between "not set" and "set to false" for bool,
+		// we'll default to true if other fields suggest config wasn't set
+	}
+
 	return nil
 }
 
@@ -275,6 +442,13 @@ func (cfg *Config) Validate() error {
 
 	if cfg.TPM.AuthEnabled && !cfg.TPM.Enabled {
 		return fmt.Errorf("cannot enable TPM password authentication when TPM device identity is disabled")
+	}
+
+	// Validate certificate renewal configuration
+	if cfg.Certificate.Renewal.Enabled {
+		if err := cfg.Certificate.Renewal.Validate(); err != nil {
+			return fmt.Errorf("certificate renewal configuration validation failed: %w", err)
+		}
 	}
 
 	// Validate audit log configuration
@@ -425,6 +599,15 @@ func mergeConfigs(base, override *Config) {
 	// instrumentation
 	overrideIfNotEmpty(&base.MetricsEnabled, override.MetricsEnabled)
 	overrideIfNotEmpty(&base.ProfilingEnabled, override.ProfilingEnabled)
+
+	// certificate renewal
+	overrideIfNotEmpty(&base.Certificate.Renewal.Enabled, override.Certificate.Renewal.Enabled)
+	overrideIfNotEmpty(&base.Certificate.Renewal.ThresholdDays, override.Certificate.Renewal.ThresholdDays)
+	overrideIfNotEmpty(&base.Certificate.Renewal.CheckInterval, override.Certificate.Renewal.CheckInterval)
+	overrideIfNotEmpty(&base.Certificate.Renewal.RetryInterval, override.Certificate.Renewal.RetryInterval)
+	overrideIfNotEmpty(&base.Certificate.Renewal.MaxRetries, override.Certificate.Renewal.MaxRetries)
+	overrideIfNotEmpty(&base.Certificate.Renewal.BackoffMultiplier, override.Certificate.Renewal.BackoffMultiplier)
+	overrideIfNotEmpty(&base.Certificate.Renewal.MaxBackoff, override.Certificate.Renewal.MaxBackoff)
 
 	for k, v := range override.DefaultLabels {
 		base.DefaultLabels[k] = v

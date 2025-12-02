@@ -5034,6 +5034,29 @@ components:
           x-go-json-ignore: true
         lifecycle:
           $ref: '#/components/schemas/DeviceLifecycleStatus'
+        certificate:
+          $ref: '#/components/schemas/CertificateStatus'
+    CertificateStatus:
+      type: object
+      description: CertificateStatus contains certificate lifecycle information for device status.
+      properties:
+        expiration:
+          type: string
+          format: date-time
+          description: Expiration is when the certificate expires.
+        daysUntilExpiration:
+          type: integer
+          description: DaysUntilExpiration is the number of days until expiration (negative if expired).
+        state:
+          type: string
+          description: State is the current certificate lifecycle state. Values: normal, expiring_soon, renewing, expired, recovering, renewal_failed.
+        lastRenewed:
+          type: string
+          format: date-time
+          description: LastRenewed is when the certificate was last renewed.
+        renewalCount:
+          type: integer
+          description: RenewalCount is the number of times the certificate has been renewed.
     DeviceLastSeen:
       type: object
       description: DeviceLastSeen represents the last seen timestamp of a device.

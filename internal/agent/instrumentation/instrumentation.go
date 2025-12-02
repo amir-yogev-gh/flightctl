@@ -19,8 +19,9 @@ const (
 )
 
 type metricsServer struct {
-	log *log.PrefixLogger
-	srv *instmetrics.MetricsServer
+	log           *log.PrefixLogger
+	srv           *instmetrics.MetricsServer
+	certCollector *agentmetrics.CertificateCollector
 }
 
 // NewMetricsServer wires a core metrics server if metrics are enabled.
@@ -37,7 +38,12 @@ func NewMetricsServer(l *log.PrefixLogger, cfg *agent_config.Config) *metricsSer
 	cfg.SetEnrollmentMetricsCallback(rpcCollector.Observe)
 	cfg.SetManagementMetricsCallback(rpcCollector.Observe)
 
-	ms.srv = instmetrics.NewMetricsServer(l, rpcCollector)
+	// Create certificate collector
+	certCollector := agentmetrics.NewCertificateCollector(l)
+	ms.certCollector = certCollector
+
+	// Register collectors with metrics server
+	ms.srv = instmetrics.NewMetricsServer(l, rpcCollector, certCollector)
 	return ms
 }
 
@@ -93,6 +99,14 @@ type AgentInstrumentation struct {
 	metrics *metricsServer
 	pprof   *pprofServer
 	log     *log.PrefixLogger
+}
+
+// GetCertificateCollector returns the certificate metrics collector if metrics are enabled.
+func (ai *AgentInstrumentation) GetCertificateCollector() *agentmetrics.CertificateCollector {
+	if ai.metrics == nil {
+		return nil
+	}
+	return ai.metrics.certCollector
 }
 
 // NewAgentInstrumentation builds the agent’s observability instrumentation (e.g., metrics, pprof).

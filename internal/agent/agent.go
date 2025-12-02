@@ -70,7 +70,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	defer cancel()
 
 	// start instrumentation early so startup paths are observable.
-	go instrumentation.NewAgentInstrumentation(a.log, a.config).Run(ctx)
+	agentInstrumentation := instrumentation.NewAgentInstrumentation(a.log, a.config)
+	go agentInstrumentation.Run(ctx)
 
 	// create file io writer and reader
 	deviceReadWriter := fileio.NewReadWriter(fileio.WithTestRootDir(a.config.GetTestRootDir()))
@@ -319,8 +320,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	// Initialize certificate manager
-	certManager, err := certmanager.NewManager(
-		ctx, a.log,
+	certManagerOpts := []certmanager.ManagerOption{
 		certmanager.WithBuiltins(
 			deviceName,
 			bootstrap.ManagementClient(),
@@ -328,7 +328,14 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.config,
 			identity.NewExportableFactory(tpmClient, a.log),
 		),
-	)
+	}
+
+	// Add metrics collector if available
+	if certCollector := agentInstrumentation.GetCertificateCollector(); certCollector != nil {
+		certManagerOpts = append(certManagerOpts, certmanager.WithMetricsCollector(certCollector))
+	}
+
+	certManager, err := certmanager.NewManager(ctx, a.log, certManagerOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to initialize certificate manager: %w", err)
 	}
@@ -336,6 +343,20 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := certManager.Sync(ctx, a.config); err != nil {
 		a.log.Warnf("Failed to sync certificate manager: %v", err)
 	}
+
+	// Start periodic expiration checking
+	if a.config.Certificate.Renewal.Enabled {
+		checkInterval := time.Duration(a.config.Certificate.Renewal.CheckInterval)
+		if checkInterval == 0 {
+			checkInterval = 24 * time.Hour // Default
+		}
+		certManager.StartPeriodicExpirationCheck(ctx, checkInterval)
+		a.log.Infof("Started periodic certificate expiration checking (interval: %v)", checkInterval)
+	}
+
+	// register certificate status exporter
+	certExporter := status.NewCertificateExporter(certManager, a.log)
+	statusManager.RegisterStatusExporter(certExporter)
 
 	// create the gRPC client this must be done after bootstrap
 	grpcClient, err := identityProvider.CreateGRPCClient(&a.config.ManagementService.Config)

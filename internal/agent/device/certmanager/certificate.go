@@ -31,6 +31,8 @@ type CertificateInfo struct {
 	NotBefore *time.Time `json:"not_before,omitempty"`
 	// Certificate validity end time (expiration)
 	NotAfter *time.Time `json:"not_after,omitempty"`
+	// LifecycleState is the current lifecycle state of the certificate
+	LifecycleState CertificateState `json:"lifecycle_state,omitempty"`
 }
 
 // certificateProvider groups certificates from a single configuration provider
@@ -193,4 +195,18 @@ func (s *certStorage) ListProviderNames() ([]string, error) {
 	}
 
 	return names, nil
+}
+
+// GetLifecycleState returns the lifecycle state from certificate info.
+func (c *certificate) GetLifecycleState() CertificateState {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Info.LifecycleState
+}
+
+// SetLifecycleState updates the lifecycle state in certificate info.
+func (c *certificate) SetLifecycleState(state CertificateState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Info.LifecycleState = state
 }

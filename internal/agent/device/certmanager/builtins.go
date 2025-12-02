@@ -50,6 +50,9 @@ func WithBuiltins(
 			return err
 		}
 
+		// Store readWriter for use in validation
+		cm.readWriter = readWriter
+
 		return nil
 	}
 }

@@ -39,6 +39,7 @@ type tpmProvider struct {
 	clientCertPath  string
 	clientCSRPath   string
 	rw              fileio.ReadWriter
+	renewalProvider *TPMRenewalProvider
 }
 
 // newTPMProvider creates a new TPM-based identity provider
@@ -50,7 +51,7 @@ func newTPMProvider(
 	rw fileio.ReadWriter,
 	log *log.PrefixLogger,
 ) *tpmProvider {
-	return &tpmProvider{
+	provider := &tpmProvider{
 		client:         client,
 		config:         config,
 		clientCertPath: clientCertPath,
@@ -58,6 +59,13 @@ func newTPMProvider(
 		rw:             rw,
 		log:            log,
 	}
+
+	// Initialize renewal provider if TPM client is available
+	if client != nil {
+		provider.renewalProvider = NewTPMRenewalProvider(client, log)
+	}
+
+	return provider
 }
 
 type tpmExportableProvider struct {
@@ -489,4 +497,12 @@ func (t *tpmProvider) WipeCertificateOnly() error {
 
 	t.log.Info("Successfully wiped certificate file")
 	return nil
+}
+
+// GenerateRenewalAttestation generates TPM attestation for certificate renewal.
+func (t *tpmProvider) GenerateRenewalAttestation(ctx context.Context) (*RenewalAttestation, error) {
+	if t.renewalProvider == nil {
+		return nil, fmt.Errorf("TPM renewal provider not available")
+	}
+	return t.renewalProvider.GenerateRenewalAttestation(ctx)
 }
