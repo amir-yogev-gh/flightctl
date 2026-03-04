@@ -1765,7 +1765,7 @@ Error messages follow this pattern:
 | Field | Description | Allowable Values / Examples |
 |-------|-------------|----------------------------|
 | **Phase** | Update stage | `Preparing` (Preparation), `ApplyingUpdate` (Sync), `Rebooting` (Activation) |
-| **Component** | System area | `os`, `config`, `applications`, `resources`, `update policy`, `lifecycle`, `systemd` |
+| **Component** | System area | `os`, `config`, `applications`, `resources`, `update policy`, `lifecycle`, `systemd`. During the Rebooting phase you may also see `reading hook actions from` or `missing rendered spec` when the failure cause is known. |
 | **Element** | Specific resource | File paths (`/etc/app.conf`), Service names, Volume names, Image refs |
 | **Category** | Functional area | See Error Categories table below. |
 | **Status** | Human-readable detail | Description of the specific error, derived from gRPC status codes. |

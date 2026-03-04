@@ -193,6 +193,13 @@ func TestMessage(t *testing.T) {
 				fmt.Errorf("%w: %w", ErrComponentConfig, ErrPermissionDenied)),
 			contains: []string{"While ApplyingUpdate", "config failed:", "permission denied"},
 		},
+		// EDM-3407: single-wrap chain in Rebooting phase; component is inferred so message is not "unknown"
+		{
+			name: "Rebooting phase with inferred component (EDM-3407)",
+			err: fmt.Errorf("%w: %w", ErrPhaseActivatingConfig,
+				fmt.Errorf("read hook file: %w", ErrReadingHookActionsFrom)),
+			contains: []string{"While Rebooting", "reading hook actions from failed", "required resource not found"},
+		},
 	}
 
 	for _, tc := range testCases {

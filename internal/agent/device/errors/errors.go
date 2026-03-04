@@ -448,6 +448,29 @@ func GetElement(err error) string {
 	return ""
 }
 
+// InferComponentDisplay returns a user-facing component name by walking the error
+// chain and matching known sentinels. Used when FormatError cannot extract a
+// component via splitWrapped (e.g. single-wrap chains). EDM-3407: avoids showing
+// "unknown" for Rebooting-phase failures like hook or spec read errors.
+func InferComponentDisplay(err error) string {
+	if err == nil {
+		return ""
+	}
+	type pair struct {
+		sentinel error
+		display  string
+	}
+	for _, p := range []pair{
+		{ErrReadingHookActionsFrom, "reading hook actions from"},
+		{ErrMissingRenderedSpec, "missing rendered spec"},
+	} {
+		if errors.Is(err, p.sentinel) {
+			return p.display
+		}
+	}
+	return ""
+}
+
 // Reason extracts the underlying reason from any error if it implements a Reason method
 // If no Reason method is detected, Error is returned
 func Reason(err error) string {

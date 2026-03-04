@@ -58,3 +58,21 @@ func TestFromStderr(t *testing.T) {
 		})
 	}
 }
+
+func TestInferComponentDisplay(t *testing.T) {
+	testCases := []struct {
+		name     string
+		err      error
+		expected string
+	}{
+		{"nil returns empty", nil, ""},
+		{"ErrReadingHookActionsFrom in chain", fmt.Errorf("load: %w", ErrReadingHookActionsFrom), "reading hook actions from"},
+		{"ErrMissingRenderedSpec in chain", fmt.Errorf("read: %w", ErrMissingRenderedSpec), "missing rendered spec"},
+		{"no known sentinel returns empty", fmt.Errorf("%w", ErrNetwork), ""},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.New(t).Equal(tc.expected, InferComponentDisplay(tc.err))
+		})
+	}
+}

@@ -17,6 +17,12 @@ type StructuredError struct {
 	Timestamp  time.Time
 }
 
+// componentDisplayError holds an inferred component name when the error chain
+// does not expose a component via splitWrapped (EDM-3407).
+type componentDisplayError struct{ display string }
+
+func (e *componentDisplayError) Error() string { return e.display }
+
 // truncateElement truncates an element value to 64 characters for use in structured error messages.
 // This ensures device status messages comply with API constraints while preserving the end of the path.
 func truncateElement(element string) string {
@@ -28,10 +34,20 @@ func truncateElement(element string) string {
 }
 
 // FormatError extracts phase and component from the error chain.
+// When component cannot be extracted (e.g. single-wrap chain), InferComponentDisplay
+// is used so the status message shows a meaningful component instead of "unknown" (EDM-3407).
 func FormatError(err error) *StructuredError {
 	phase, rest := splitWrapped(err)
 	component, rest := splitWrapped(rest)
 	statusCode := ToCode(rest)
+
+	// EDM-3407: single-wrap chains (e.g. afterUpdate -> CreateRollback Read) leave
+	// component nil; infer a display string from the rest of the chain.
+	if component == nil {
+		if display := InferComponentDisplay(rest); display != "" {
+			component = &componentDisplayError{display: display}
+		}
+	}
 
 	return &StructuredError{
 		Phase:      phase,
