@@ -41,6 +41,20 @@ Flight Control is a service for declarative management of fleets of edge devices
 - **API changes:** Edit OpenAPI YAML and hand-maintained types (e.g. `api/core/v1beta1/types.go`), then `make generate`. Do not edit `*.gen.go` by hand.
 - **Documentation:** User docs under `docs/user/`, developer docs under `docs/developer/`. Run `make lint-docs` and `make spellcheck-docs` for user docs.
 
+
+## Key workflows
+This repository contains workflow definitions. Workflows are automatically discovered by the platform from the `.workflows/` directory.
+
+**Key directories:**
+
+```text
+.workflows/            # All workflow definitions
+├── bugfix/            # Bug fix workflow
+├── triage/            # Issue triage workflow
+├── spec-kit/          # Specification workflow
+├── prd-rfe-workflow/  # PRD/RFE workflow
+```
+
 ## Before committing
 
 1. **Keep docs up to date** – If you change behavior, APIs, or workflows, update the relevant docs in `docs/user/` or `docs/developer/` and run `make lint-docs` (and `make spellcheck-docs` for user docs).
