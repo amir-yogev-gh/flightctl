@@ -87,6 +87,7 @@ Create `.artifacts/{number}/bugfix/docs/pr-description.md` with:
 - Before/after comparisons if applicable
 - Manual testing needed by reviewers
 - Do not include a References section
+- **`## Related` section** — If listing related issues or prior work, link to GitHub PRs and issues (e.g., `[#47](https://github.com/org/repo/pull/47)`), not external trackers like Jira
 
 ## Output
 
