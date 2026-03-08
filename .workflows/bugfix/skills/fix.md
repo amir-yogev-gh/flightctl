@@ -41,21 +41,30 @@ Implement targeted bug fixes that resolve the underlying issue without introduci
 - Include inline comments explaining **why** the fix works, not just **what** it does
 - Reference the issue number in comments (e.g., `// Fix for #1234: add retry logic`)
 
-### Step 4: Address Related Code
+### Step 4: Verify Completeness
+
+Before finalizing the implementation, ensure thoroughness:
+
+- **Identify all possible states/phases**: If fixing state-dependent logic, search the codebase to find the complete list of states, phases, or conditions (e.g., all terminal states, all error types, all lifecycle phases). Don't assume you know all variants - verify by searching similar code patterns.
+- **Understand feature interactions**: If your fix uses multiple configuration options or features together (e.g., polling + pagination), research how they interact. Read documentation, search for existing usage patterns, and test the interaction.
+- **Check for complete enumeration**: If implementing switch/case logic or conditional checks, verify you've handled all possible values. Search the codebase for where these values are defined or used.
+- **Example**: If implementing polling that stops on "terminal" session phases, search the codebase for all usages of session phases to build a complete list (Stopped, Completed, Failed, Error) rather than assuming you know them all.
+
+### Step 5: Address Related Code
 
 - Fix similar patterns identified in root cause analysis
 - Update affected function signatures if necessary
 - Ensure consistency across the codebase
 - Consider adding defensive programming where appropriate
 
-### Step 5: Update Documentation
+### Step 6: Update Documentation
 
 - Update inline code documentation
 - Modify API documentation if interfaces changed
 - Update configuration documentation if settings changed
 - Note any breaking changes clearly
 
-### Step 6: Pre-commit Quality Checks
+### Step 7: Pre-commit Quality Checks
 
 - Run code formatters
 - Run linters and fix all warnings
@@ -63,7 +72,7 @@ Implement targeted bug fixes that resolve the underlying issue without introduci
 - Check for any new security vulnerabilities introduced
 - Verify no secrets or sensitive data added
 
-### Step 7: Document Implementation
+### Step 8: Document Implementation
 
 Create `.artifacts/{number}/bugfix/fixes/implementation-notes.md` containing:
 
