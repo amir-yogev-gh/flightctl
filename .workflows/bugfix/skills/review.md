@@ -30,6 +30,8 @@ Gather all available context before forming any opinion:
 - The actual code changes (diff or modified files)
 - The actual test code that was written
 
+Read the **full files** that were modified, not just the diff. The diff shows what changed; the surrounding code shows whether the change is consistent with its context and whether related code paths have the same problem.
+
 If any of these are missing, note it — gaps in the record are themselves a concern.
 
 ### Step 2: Critique the Fix
@@ -59,6 +61,35 @@ Ask these questions honestly:
 - Does it follow the project's coding standards?
 - Is it readable and maintainable?
 - Are there magic numbers, unclear variable names, or missing comments?
+
+**Security (critical)**
+
+- No hardcoded secrets, tokens, API keys, or credentials in the diff
+- Input validation on all external or user-facing data
+- Error messages don't leak sensitive information (stack traces, internal paths, credentials)
+- No SQL injection, command injection, or path traversal vectors
+- For agent code: no token or secret logging (per workflow AGENTS.md: use `len(token)`, redact in logs)
+
+**Performance**
+
+- No unnecessary allocations in hot paths
+- Loops bounded (no unbounded iteration over external data)
+- For agent code: serial operations preferred over parallel (per `internal/agent/AGENTS.md`)
+- Resource cleanup: connections, file handles, channels properly closed
+- No goroutine leaks (goroutines exit cleanly)
+
+**Project-specific (when the fix touches `internal/agent/`)**
+
+If the fix modifies code under `internal/agent/`, also check against the agent's code review checklist in `internal/agent/AGENTS.md`: no unnecessary dependencies; uses fileio for ALL disk operations; spec access via spec manager only; no unwarranted async code; PR is minimal and focused; one way to do things; error wrapping uses `errors.WithElement()` for user-facing error chains; import order (stdlib then external, per `gci`).
+
+**Backward compatibility and rollback safety**
+
+- Does the fix change any public APIs, error formats, configuration options, or wire protocols? If so, is it backward-compatible or is the breaking change documented and justified?
+- Could this fix be reverted without leaving the system in an inconsistent state? (Important for edge device agent code where rollback is a core mechanism.)
+
+**Completeness across call sites**
+
+If the fix wraps, guards, or handles something in one location, search the codebase for similar patterns that need the same treatment. A fix that addresses 7 of 8 identical issues is itself a bug.
 
 ### Step 3: Critique the Tests
 
@@ -91,9 +122,13 @@ Ask these questions honestly:
 
 - This is the key question. If yes, the tests are incomplete.
 
-### Step 4: Form a Verdict
+### Step 4: Verify Lint and Tests
 
-Based on Steps 2 and 3, classify the situation into one of these categories:
+Before forming a verdict, verify that lint and unit tests pass cleanly with the fix applied. If they weren't run or results are missing from the test verification report, flag this as a gap.
+
+### Step 5: Form a Verdict
+
+Based on Steps 2–4, classify the situation into one of these categories. **Severity rules**: Any CRITICAL finding forces verdict "Fix is inadequate". Any HIGH finding forces at least "Fix is adequate, but tests are incomplete".
 
 #### Verdict: Fix is inadequate
 
@@ -123,9 +158,18 @@ covered, and you don't see meaningful gaps.
 
 **Recommendation**: Proceed to `/document` and/or `/pr`.
 
-### Step 5: Report to the User
+### Step 6: Report to the User
 
-Present your findings clearly. Use this structure:
+Persist the review report to `.artifacts/{number}/bugfix/review/review.md`, then present the same findings inline to the user. Use the issue/ticket number from context (e.g. EDM-1234) for `{number}`. Classify each finding by **severity** (CRITICAL / HIGH / MEDIUM / LOW) and as **blocker** (must fix before merge) or **suggestion** (nice to have). CRITICAL and HIGH are blockers; MEDIUM and LOW are suggestions.
+
+**Severity levels:**
+
+- **CRITICAL**: Blocks merge. Security issue, data loss risk, or fix doesn't address root cause.
+- **HIGH**: Should be fixed before merge. Missing error handling, incomplete coverage, race condition.
+- **MEDIUM**: Should be fixed but not a blocker. Style, naming, minor edge case.
+- **LOW**: Suggestion for improvement. Readability, minor refactoring opportunity.
+
+Use this structure:
 
 ```
 ## Fix Review
@@ -135,8 +179,14 @@ Present your findings clearly. Use this structure:
 ### Strengths
 - [What's good about the fix]
 
-### Concerns
-- [What's problematic or risky — be specific with file:line references]
+### Findings
+
+| # | Severity | File:Line | Finding | Suggestion |
+|---|----------|-----------|---------|------------|
+| 1 | CRITICAL | path:42 | ... | ... |
+| 2 | LOW | path:88 | ... | ... |
+
+(If no findings, write "No findings." and omit the table.)
 
 ## Test Review
 
@@ -145,10 +195,13 @@ Present your findings clearly. Use this structure:
 ### Strengths
 - [What's well-tested]
 
-### Gaps
-- [What's missing or insufficient — be specific]
+### Gaps / Findings
 
-## Verdict: [one-line summary]
+[Use the same findings table format if there are test-specific findings; otherwise list gaps as bullet points.]
+
+## Verdict: [one-line summary] ([Confidence: High 90–100% / Medium 70–89% / Low &lt;70%])
+
+Include your confidence level with the verdict. If confidence is below 80%, escalate per the workflow's escalation rules (see controller / AGENTS.md).
 
 ## Recommendation
 
@@ -161,7 +214,8 @@ are insufficient, say what's missing.
 
 ## Output
 
-- Review findings reported directly to the user (inline, not a file)
+- **Persisted**: Full review report written to `.artifacts/{number}/bugfix/review/review.md` (create the `review/` directory if needed)
+- **Inline**: The same review findings presented directly to the user in the conversation
 - If issues are found, specific guidance on what to fix or test next
 
 ## Usage Examples
@@ -184,10 +238,10 @@ are insufficient, say what's missing.
 - The value of this step comes from being skeptical, not confirmatory. Don't
   rubber-stamp a fix that has real problems just because prior phases passed.
 - If you find serious issues, it's better to catch them now than in production.
+- Clearly label each finding as either a **blocker** (must fix before merge) or a **suggestion** (nice to have, can be addressed later or in a follow-up). CRITICAL and HIGH are blockers; MEDIUM and LOW are suggestions.
 
 ## When This Phase Is Done
 
-Your verdict and recommendation (from Step 5) serve as the phase summary.
+Your verdict and recommendation (from Step 6) serve as the phase summary. Tell the user where the review was written (`.artifacts/{number}/bugfix/review/review.md`).
 
 Then **re-read the controller** (`skills/controller.md`) for next-step guidance.
-- Your proposed plan
