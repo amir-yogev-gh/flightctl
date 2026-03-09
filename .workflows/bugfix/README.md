@@ -10,7 +10,6 @@ This workflow provides a structured approach to fixing software bugs:
 - **Root Cause Focus**: Emphasizes understanding *why* bugs occur, not just *what* happens
 - **Comprehensive Testing**: Ensures fixes work and prevents regression
 - **Complete Documentation**: Creates all artifacts needed for release and future reference
-- **Agent Collaboration**: Leverages ACP platform agents for complex scenarios
 
 ## Directory Structure
 
